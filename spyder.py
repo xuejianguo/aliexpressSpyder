@@ -12,7 +12,75 @@ import requests
 import queue
 import csv
 import sys
-class CommentSpyder(object):
+# 获取评论总页数
+def get_total_page(url):
+    total_page=0
+    headers={
+        'user-agent':'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36',        
+    }
+    try:
+        res=requests.get(url,headers=headers,timeout=30)
+        soup=BeautifulSoup(res.text,'html.parser')
+        tpage=int(soup.select('#simple-pager')[0].select('.ui-label')[0].text.split('/')[1])
+        total_page=tpage
+        # 速卖通平台评论500页之后，均返回第一页数据
+        if total_page>=500:
+            total_page=500
+            print('总共有'+str(total_page)+'页')
+    except requests.RequestException as e:
+        print("requestsException")
+        print(e)
+    except requests.ConnectionError as e:
+        print("connectionError")
+        print(e)
+    except requests.HTTPError as e:
+        print("httpError")
+        print(e)
+    except requests.URLRequired as e:
+        print('urlRequired')
+        print(e)
+    except requests.ConnectTimeout as e:
+        print("connectTimeout")
+        print(e)
+    except requests.ReadTimeout as e:
+        print("readTimeout")
+        print(e)
+    except Exception as e:
+        print("获取总页数失败")
+        print("失败信息")
+        print(e)
+    finally:
+        return total_page
+# 用于根据productid，ownerid,companyid构造获取token url
+def get_url(productid,owner_memberid,companyid,member_type="seller",start_valid_date="",il8n="true"):
+    host="https://feedback.aliexpress.com/display/productEvaluation.htm?"
+    url=host+"productId="+productid
+    url+="&ownerMemberId="+owner_memberid
+    url+="&companyId="+companyid
+    url+="&memberType="+member_type
+    url+="&startValidDate="+start_valid_date
+    url+="s&il8n="+il8n
+    return url
+# 用于更新iplist.txt文件,需要的时候手动调用
+def update_ip_list():
+    url='http://www.xicidaili.com/nn/'
+    headers={
+        'user-agent':'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36',        
+    }
+    web_data=requests.get(url,headers=headers)
+    soup=BeautifulSoup(web_data.text,'html.parser')
+    ips=soup.select('tr')
+    ip_list=[]
+    for i in range(1,len(ips)):
+        ip_info=ips[i]
+        tds=ip_info.select('td')
+        ip_list.append(tds[1].text+':'+tds[2].text)
+    with open("iplist.txt","a",encoding='utf-8') as f:
+            for ip in ip_list:
+                f.write(ip)
+                f.write('\n')
+    return ip_list
+class CommentSpyder(threading.Thread):
     headers={
         'authority':'feedback.aliexpress.com',
         'method':'POST',
@@ -28,10 +96,12 @@ class CommentSpyder(object):
         'referer':'https://feedback.aliexpress.com/display/productEvaluation.htm?productId=32666095400&ownerMemberId=223547137&companyId=233309784&memberType=seller&startValidDate=&i18n=true',
         'upgrade-insecure-requests':'1',
         'user-agent':'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36',
-    }      
+    } 
+    # 初始化    
     def __init__(self,url,productid,owner_memberid,companyid,result_queue,start_page=1,end_page=1):
-        requests.adapters.DEFAULT_RETRIES = 5
-        self.url=url        
+        super().__init__()
+        self.url=url
+        self.posturl="https://feedback.aliexpress.com/display/productEvaluation.htm"      
         self.productid=productid
         self.owner_memberid=owner_memberid
         self.companyid=companyid
@@ -43,10 +113,35 @@ class CommentSpyder(object):
             print('请输入产品编号，店主编号，以及公司编号')
             return
         self.session=requests.Session()
-        self.session.keep_live=True
+        self.session.keep_live=False
         self.ip_list=self.get_ip_list()       
         self.token=self.get_token(self.session)
+        if self.token=='':
+            print('爬虫初始化失败 caused by token 获取失败')
+            return 
+        self.data=dict()
+        self.create_post_data()
         print("报告老大:知客爬虫初始化已完毕,等待爬取数据")
+    # 构造post data对象
+    def create_post_data(self):
+        self.data['ownerMemberId']=self.owner_memberid
+        self.data['memberType']='seller'
+        self.data['productId']=self.productid
+        self.data['companyId']=''
+        self.data['evaStarFilterValue']='all Stars'
+        self.data['evaSortValue']='sortdefault@feedback'
+        self.data['startValidDate']=''
+        self.data['i18n']='true'
+        self.data['withPictures']='false'
+        self.data['withPersonalInfo']='false'
+        self.data['withAdditionalFeedback']='false'
+        self.data['onlyFromMyCountry']='false'
+        self.data['isOpened']='true'
+        self.data['version']='evaNlpV1_2'
+        self.data['translate']='N'
+        self.data['jumpToTop']='false'
+        self.data['_csrf_token']=self.token
+    # 读取iplist为一个list
     def get_ip_list(self):
         temp_ip_list=[]
         with open('iplist.txt', 'r') as f:
@@ -55,15 +150,17 @@ class CommentSpyder(object):
                 temp_ip_list.append('http://'+ip)
                 if not ip:
                     break
-        return temp_ip_list       
-    def get_random_ip(self):        
+        return temp_ip_list
+    # 从self.iplist中随机选择一个ip     
+    def get_random_ip(self):    
         proxy_ip=random.choice(self.ip_list)
         proxies={
             'http':proxy_ip
         }
         return proxies
+    # 获取相应token，没有token，无法得到数据
     def get_token(self,session):
-        print('开始获取token')
+        _csrf_token=''
         try:
             proxies=self.get_random_ip()
             self.proxies=proxies
@@ -89,16 +186,21 @@ class CommentSpyder(object):
         except requests.ReadTimeout as e:
             print("readTimeout")
             print(e)
-        except Exception as e:
-            _csrf_token=''
+        except Exception as e:            
             print("获取token失败")
             print("失败信息")
             print(e)
         finally:
             return _csrf_token
-    def parse_comment(self,comment_soup):
-        comments=[]
-        try:        
+    # 评论页面解析函数，参数为html页面
+    def parse_comment(self,comment_html):
+        try:
+            comment_soup=BeautifulSoup(comment_html.text,'html.parser')
+        except Exception as e:
+            print("suop构造失败")
+            print(e)
+            return 
+        try:               
             feedback_star=comment_soup.select('.star-view')
             fb_mains=comment_soup.select('.fb-main')
             user_info=comment_soup.select('.fb-user-info')
@@ -134,64 +236,31 @@ class CommentSpyder(object):
                 except Exception as e:
                     additional_feedback=''
                     print(e)
-                tempData={
-                        'username':username,
-                        'usercountry':usercountry,
-                        'buyer_feedback':buyer_feedback,
-                        'star':star,
-                        'feedback_time':feedback_time,
-                        'additional_feedback':additional_feedback
-                }
+                tempData=dict()
+                tempData['username']=username
+                tempData['usercountry']=usercountry
+                tempData['buyer_feedback']=buyer_feedback
+                tempData['star']=star
+                tempData['feedback_time']=feedback_time
+                tempData['additional_feedback']=additional_feedback
+                print(tempData)
+                print('\n')
                 self.result_queue.put(tempData)
-                comments.append(temp)
         except Exception as e:
-            username=''
-            usercountry=''
-            star=0
-            color=''
-            size=''
-            logistics=''
-            buyer_feedback=''
-            feedback_time=''
-            additional_feedback=''
-            temp=[username,usercountry,color,size,logistics,buyer_feedback,star,feedback_time,additional_feedback]
-            comments.append(temp)
             print("解析出错")
             print("出错信息")
             print(e)
-        finally:
-            return comments
+    # 按页爬取评论，参数为page
     def crawl_comment_by_page(self,page):
-        if(self.token==''):
-            return
-        page=page
-        data={
-            'ownerMemberId':self.owner_memberid,
-            'memberType':'seller',
-            'productId':self.productid,
-            'companyId':'',
-            'evaStarFilterValue':'all Stars',
-            'evaSortValue':'sortdefault@feedback',
-            'page':page,
-            'currentPage':'1',
-            'startValidDate':'',
-            'i18n':'true',
-            'withPictures':'false',
-            'withPersonalInfo':'false',
-            'withAdditionalFeedback':'false',
-            'onlyFromMyCountry':'false',
-            'isOpened':'true',
-            'version':'evaNlpV1_3',
-            'translate': 'N' ,
-            'jumpToTop':'true',
-            '_csrf_token':self.token,
-        }
+        current_page=page-1
+        if current_page==0:
+            current_page=2
+        self.data['page']=str(page)
+        self.data['currentPage']=str(current_page)
         try:
-            print("第"+str(page)+"页数据")
             proxies=self.get_random_ip()
-            comment_html=self.session.post("https://feedback.aliexpress.com/display/productEvaluation.htm",headers=self.headers,data=data,timeout=30)
-            comment_soup=BeautifulSoup(comment_html.text,'html.parser')
-            return self.parse_comment(comment_soup)
+            comment_html=self.session.post(self.posturl,headers=self.headers,data=self.data,timeout=30,proxies=proxies)            
+            self.parse_comment(comment_html)
         except requests.RequestException as e:
             print("requestsException")
             print(e)
@@ -214,20 +283,17 @@ class CommentSpyder(object):
             print("爬取出错")
             print("出错信息")
             print(e)
-            return None
-    def crawl_comments(self):
-        print("开始抓取")
-        # self.mutex.acquire()
+    def run(self):
         start=self.start_page
         end=self.end_page
-        while start <=end:           
-            self.crawl_comment_by_page(start)            
+        while start <=end:
+            self.crawl_comment_by_page(start)          
             start=start+1
-            time.sleep(1)
-        # self.mutex.release()
+            time.sleep(3)
+# saver线程，用于从队列中取数据,并保存
 class Saver(threading.Thread):
     def __init__(self,result_queue,productid,owner_memberid,method='db',db='aliexpress',user='root',password='password'):
-        super().__init__() # 必须调用
+        super().__init__()
         self.result_queue = result_queue
         self.productid=productid
         self.owner_memberid=owner_memberid        
@@ -240,7 +306,6 @@ class Saver(threading.Thread):
         filename=self.owner_memberid+self.productid+".csv"
         with open(filename,"a",newline = "",encoding='utf-8') as f:
             writer = csv.writer(f,dialect = "excel")
-            # writer.writerow(["产品编号","用户名","国家","评论","评分","评论时间","追评"])
             writer.writerow([data['no'],self.productid,data['username'],data['usercountry'],data['buyer_feedback'],data['star'],data['feedback_time'],data['additional_feedback']])
     def save_data_to_db(self,data):
         try:
@@ -261,104 +326,40 @@ class Saver(threading.Thread):
                 self.save_data_to_csv(data)
             else:
                 pass
-            print("插入"+str(i)+'条数据')
+            print("插入第"+str(i)+'条数据')
             i=i+1
     def closeConn(self):
         self.conn.close()
-def get_total_page(url):
-    print('开始获取总页数')
-    total_page=0
-    headers={
-        'user-agent':'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36',        
-    }
-    try:
-        res=requests.get(url,headers=headers,timeout=30)
-        print(res)
-        soup=BeautifulSoup(res.text,'html.parser')
-        tpage=int(soup.select('#simple-pager')[0].select('.ui-label')[0].text.split('/')[1])
-        print('总共有'+str(tpage)+'页')
-        total_page=tpage
-    except requests.RequestException as e:
-        print("requestsException")
-        print(e)
-    except requests.ConnectionError as e:
-        print("connectionError")
-        print(e)
-    except requests.HTTPError as e:
-        print("httpError")
-        print(e)
-    except requests.URLRequired as e:
-        print('urlRequired')
-        print(e)
-    except requests.ConnectTimeout as e:
-        print("connectTimeout")
-        print(e)
-    except requests.ReadTimeout as e:
-        print("readTimeout")
-        print(e)
-    except Exception as e:
-        total_page=0
-        print("获取总页数失败")
-        print("失败信息")
-        print(e)
-    finally:
-        return total_page
-def get_url(productid,owner_memberid,companyid,member_type="seller",start_valid_date="",il8n="true"):
-    host="https://feedback.aliexpress.com/display/productEvaluation.htm?"
-    url=host+"productId="+productid
-    url+="&ownerMemberId="+owner_memberid
-    url+="&companyId="+companyid
-    url+="&memberType="+member_type
-    url+="&startValidDate="+start_valid_date
-    url+="s&il8n="+il8n
-    return url
-def update_ip_list():
-    url='http://www.xicidaili.com/nn/'
-    headers={
-        'user-agent':'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36',        
-    }
-    web_data=requests.get(url,headers=headers)
-    soup=BeautifulSoup(web_data.text,'html.parser')
-    ips=soup.select('tr')
-    ip_list=[]
-    for i in range(1,len(ips)):
-        ip_info=ips[i]
-        tds=ip_info.select('td')
-        ip_list.append(tds[1].text+':'+tds[2].text)
-    with open("iplist.txt","a",encoding='utf-8') as f:
-            for ip in ip_list:
-                f.write(ip)
-                f.write('\n')
-    return ip_list
-def crawl(url,productid,owner_memberid,companyid,result_queue,start_page,end_page):
-    spyder=CommentSpyder(url,productid,owner_memberid,companyid,result_queue,start_page,end_page)
-    spyder.crawl_comments()
 def main(productid,owner_memberid,companyid,thread_num=10):
     result_queue = queue.Queue()
     url=get_url(productid,owner_memberid,companyid)
     print("token Url:"+url)
-    total_page=get_total_page(url)
+    # 获取评论总页数
     t1=time.time()
+    total_page=get_total_page(url)
+    t2=time.time()
+    print('获取总页数耗时:'+str(t2-t1))   
+    spyders=[]
+    #根据评论总页数和线程数(默认10)为每个线程平均分配每个线程负责的页码数
     if total_page>0:
-        page_num_per_thread=int(total_page/thread_num)
+        page_num_per_thread=int(total_page/thread_num)   
         for i in range(thread_num):
             start_page=i*page_num_per_thread+1
             end_page=(i+1)*page_num_per_thread
             if(i==(thread_num-1)):
-                end_page=total_page
-            # spyder=CommentSpyder(url,productid,owner_memberid,companyid,result_queue,start_page,end_page)
-            crawl_thread = threading.Thread(target = crawl,args=(url,productid,owner_memberid,companyid,result_queue,start_page,end_page))
-            # time.sleep(0.5)
-            crawl_thread.start()
+                end_page=total_page        
+            spyder = CommentSpyder(url,productid,owner_memberid,companyid,result_queue,start_page,end_page)
+            spyders.append(spyder)
+        for spyder in spyders:
+            spyder.start()
         saver = Saver(result_queue,productid,owner_memberid)
-        saver.daemon = True
+        saver.daemon = True        
         saver.start()
-        crawl_thread.join()
+        for i in range(10):
+            spyders[i].join()
         saver.closeConn()
-    t2=time.time()
-    print('耗时:'+str(t2-t1))
 if __name__ == '__main__':
-    productid="1922379122"
-    owner_memberid="202786662"
-    companyid="215239279"
+    productid="32350887279"
+    owner_memberid="222390142"
+    companyid="232202251"
     main(productid,owner_memberid,companyid)
